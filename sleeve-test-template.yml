@@ -1,0 +1,52 @@
+.alpine_setup: &alpine_setup
+  tags:
+    - experimental
+  image: gcr.io/solutions-team-280017/swiss-alpine:latest
+  before_script:
+    # Make sure the trigger payload env vars are set
+    - |
+      for s in $(cat $TRIGGER_PAYLOAD | jq .variables| jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" ); do
+          export $s
+      done
+
+#-- SLEEVE list
+#--  define which stack to use
+.test-template: &test-template
+  tags:
+    - experimental
+  only:
+    variables:
+      - $SLEEVE == "test-template" && $DESTROY != "test-template"
+
+.destroy_test-template: &destroy_test-template
+  tags:
+    - experimental
+  only:
+    variables:
+      - $DESTROY == "test-template" && $SLEEVE == "test-template"
+
+# SLEEVE = 'test-template'
+test-template_apply:
+  <<: *alpine_setup
+  <<: *test-template
+  stage: test
+  script:
+    - ./sleeves/test-template/create-test-template-vars
+    - cd ./templates/test-template
+    - terraform init -backend-config=s3_backend
+    - terraform providers
+    - terraform apply -var-file=demo.tfvars.json -auto-approve
+  retry: 2
+
+# SLEEVE 'test-template' destroy
+test-template_destroy:
+  <<: *alpine_setup
+  <<: *destroy_test-template
+  stage: test
+  script:
+    - ./sleeves/test-template/create-test-template-vars
+    - cd ./templates/test-template
+    - terraform init -backend-config=s3_backend
+    - terraform providers
+    - terraform destroy -var-file=demo.tfvars.json -auto-approve
+  retry: 2

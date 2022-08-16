@@ -1,0 +1,38 @@
+#!/bin/bash
+set -ex
+
+kubeconfig_path=$1
+namespace=$2
+wait_timeout=900 # wait 15 min for pods
+pod_amt=$3
+if [ -z "$pod_amt" ]; then
+  pod_amt=1
+fi
+
+# test pod status
+kube_status=$(kubectl --kubeconfig $kubeconfig_path get pods -n $namespace)
+waiting=0
+
+# "No resources found." error
+while [ $waiting -le $wait_timeout ] && [ -z "$kube_status" ]; do
+  echo "Waiting $waiting seconds for nodes to come up..."
+  kubectl --kubeconfig $kubeconfig_path get nodes --all-namespaces
+  sleep 30
+  waiting=$((waiting+30))
+  kube_status=$(kubectl --kubeconfig $kubeconfig_path get pods -n $namespace)
+done
+
+while [ $waiting -le $wait_timeout ] && [ "$(echo $kube_status | grep -c "0/$pod_amt")" -ne 0 ]; do
+  echo "Waiting $waiting seconds for pods to come up..."
+  sleep 30
+  waiting=$((waiting+30))
+  kube_status=$(kubectl --kubeconfig $kubeconfig_path get pods -n $namespace)
+done
+
+# fail if its not up in 15 minutes
+if [ $waiting -le $wait_timeout ]; then
+  echo "Pods are up after $waiting seconds."
+else
+  echo "Pods Failed to come up in in $wait_timeout seconds."
+  exit 1
+fi

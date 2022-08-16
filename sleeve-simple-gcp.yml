@@ -1,0 +1,123 @@
+.setup_prod: &setup_prod
+  except:
+    variables:
+      - $ENV_NAME =~ /staging$/
+    refs:
+      - schedules
+  image:
+    name: gcr.io/volterraio/volt-terraform${TF_PUBLIC_PROD_SHA}
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/go/bin'
+  before_script:
+    - terraform version
+    # Make sure the trigger payload env vars are set
+    - |
+      for s in $(cat $TRIGGER_PAYLOAD | jq .variables| jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" ); do
+          export $s
+      done
+
+.setup_stage: &setup_stage
+  except:
+    variables:
+      - $ENV_NAME =~ /prod$/
+    refs:
+      - schedules
+  image:
+    name: gcr.io/volterraio/volt-terraform${TF_PUBLIC_STAGE_SHA}
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/go/bin'
+  before_script:
+    - terraform version
+    # Make sure the trigger payload env vars are set
+    - |
+      for s in $(cat $TRIGGER_PAYLOAD | jq .variables| jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" ); do
+          export $s
+      done
+
+.alpine_setup: &alpine_setup
+  tags:
+    - experimental
+  image: gcr.io/solutions-team-280017/swiss-alpine:latest
+  before_script:
+    # Make sure the trigger payload env vars are set
+    - |
+      for s in $(cat $TRIGGER_PAYLOAD | jq .variables| jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" ); do
+          export $s
+      done
+
+#-- SLEEVE list
+#--  define which stack to use
+.simple-gcp: &simple-gcp
+  tags:
+    - experimental
+  only:
+    variables:
+      - $SLEEVE == "simple-gcp" && $DESTROY != "simple-gcp"
+
+.destroy_simple-gcp: &destroy_simple-gcp
+  tags:
+    - experimental
+  only:
+    variables:
+      - $DESTROY == "simple-gcp" && $SLEEVE == "simple-gcp"
+
+# SLEEVE = 'simple-gcp'
+simple-gcp_instance_prod:
+  <<: *setup_prod
+  <<: *simple-gcp
+  stage: deploy_infra
+  script:
+    - ./sleeves/simple-gcp/create-gcp-vars
+    - cd ./templates/simple-gcp
+    - terraform init -backend-config=s3_backend
+    - terraform providers
+    - terraform apply -var-file=demo.tfvars.json -auto-approve
+  retry: 2
+
+simple-gcp_instance_stage:
+  <<: *setup_stage
+  <<: *simple-gcp
+  stage: deploy_infra
+  script:
+    - ./sleeves/simple-gcp/create-gcp-vars
+    - cd ./templates/simple-gcp
+    - terraform init -backend-config=s3_backend
+    - terraform providers
+    - terraform apply -var-file=demo.tfvars.json -auto-approve
+  retry: 2
+
+simple-gcp_check_site:
+  <<: *alpine_setup
+  <<: *simple-gcp
+  stage: test
+  script:
+    - aws s3 cp s3://${S3_STORAGE_BUCKET}/${S3_STORAGE_PATH}/${SLEEVE}/terraform.tfstate ./terraform.tfstate
+    - ./sleeves/common/ansible-ping $(jq -r .outputs.public_addresses.value ./terraform.tfstate)
+  retry: 2
+
+# SLEEVE 'simple-gcp' destroy
+destroy_simple-gcp_instance_prod:
+  <<: *setup_prod
+  <<: *destroy_simple-gcp
+  stage: destroy
+  script:
+    - ./sleeves/simple-gcp/create-gcp-vars
+    - cd ./templates/simple-gcp
+    - terraform init -backend-config=s3_backend
+    - terraform providers
+    - terraform destroy -var-file=demo.tfvars.json -auto-approve
+  retry: 2
+
+destroy_simple-gcp_instance_stage:
+  <<: *setup_stage
+  <<: *destroy_simple-gcp
+  stage: destroy
+  script:
+    - ./sleeves/simple-gcp/create-gcp-vars
+    - cd ./templates/simple-gcp
+    - terraform init -backend-config=s3_backend
+    - terraform providers
+    - terraform destroy -var-file=demo.tfvars.json -auto-approve
+  retry: 2

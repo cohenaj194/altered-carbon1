@@ -1,0 +1,113 @@
+#!/bin/sh
+set -e 
+
+stack_name=$1
+sleeve=$2
+action=$3
+staging=$4
+
+options_list="
+      environment-check
+      test-template
+      simple-azure
+      simple-aws
+      simple-gcp
+"
+
+if [[ "$1" == "help" || "$2" == "help" || "$3" == "help" ]]; then
+  echo "
+      Triggers altered-carbon deployments for gitlab using the gitlab api and curl:
+        
+        cli/deploy-default-stack.sh \$STACK_NAME \$SLEEVE (apply/destroy)
+    
+      examples: 
+    
+        cli/deploy-default-stack mystackname simple-aws apply
+
+      can deploy to default.staging with an extra argument:
+
+        cli/deploy-default-stack mystackname simple-aws apply staging
+
+      list of sleeves: 
+      $options_list
+  "
+  exit 0
+fi
+
+if [[ -z "$AC_GITLAB_PIPELINE_TRIGGER_TOKEN" ]]; then
+  echo "missing AC_GITLAB_PIPELINE_TRIGGER_TOKEN, please create a pipeline trigger token and set this in your environment."
+  exit 1
+fi
+if [[ -z "$stack_name" ]]; then
+  echo "missing stack_name"
+  echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply"
+  exit 1
+fi
+if [[ -z "$sleeve" ]]; then
+  echo "missing sleeve"
+  echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply"
+  exit 1
+fi
+
+valid_sleeve=false
+for sl in `echo $options_list`; do 
+  if [[ "$sleeve" == "$sl" ]]; then
+    valid_sleeve=true
+  fi
+done
+
+if [[ "$valid_sleeve" == "false" ]]; then
+  echo "invalid sleeve: $sleeve"
+  echo
+  echo "options: $options_list"
+  exit 1
+fi
+
+branch_name="$(git rev-parse --abbrev-ref HEAD)"
+
+if [[ $staging = "staging" ]]; then
+  if [[ $action = "apply" ]]; then
+    curl --request POST \
+      --form "token=$AC_GITLAB_PIPELINE_TRIGGER_TOKEN" \
+      --form "ref=$branch_name" \
+      --form "variables[STACK_NAME]=$stack_name" \
+      --form "variables[SLEEVE]=$sleeve" \
+      --form "variables[ENV_NAME]=default.staging" \
+      https://gitlab.com/api/v4/projects/$AC_GITLAB_PROJECT_ID/trigger/pipeline
+  elif [[ $action == "destroy" ]]; then
+    curl --request POST \
+      --form "token=$AC_GITLAB_PIPELINE_TRIGGER_TOKEN" \
+      --form "ref=$branch_name" \
+      --form "variables[STACK_NAME]=$stack_name" \
+      --form "variables[SLEEVE]=$sleeve" \
+      --form "variables[DESTROY]=$sleeve" \
+      --form "variables[ENV_NAME]=default.staging" \
+      https://gitlab.com/api/v4/projects/$AC_GITLAB_PROJECT_ID/trigger/pipeline
+  else
+    echo "ERROR: action should be 'apply' or 'destroy'"
+    echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply staging"
+    exit 1
+  fi
+else
+  if [[ $action = "apply" ]]; then
+    curl --request POST \
+      --form "token=$AC_GITLAB_PIPELINE_TRIGGER_TOKEN" \
+      --form "ref=$branch_name" \
+      --form "variables[STACK_NAME]=$stack_name" \
+      --form "variables[SLEEVE]=$sleeve" \
+      https://gitlab.com/api/v4/projects/$AC_GITLAB_PROJECT_ID/trigger/pipeline
+  elif [[ $action == "destroy" ]]; then
+    curl --request POST \
+      --form "token=$AC_GITLAB_PIPELINE_TRIGGER_TOKEN" \
+      --form "ref=$branch_name" \
+      --form "variables[STACK_NAME]=$stack_name" \
+      --form "variables[SLEEVE]=$sleeve" \
+      --form "variables[DESTROY]=$sleeve" \
+      https://gitlab.com/api/v4/projects/$AC_GITLAB_PROJECT_ID/trigger/pipeline
+  else
+    echo "ERROR: action should be 'apply' or 'destroy'"
+    echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply"
+    exit 1
+  fi
+fi
+echo 

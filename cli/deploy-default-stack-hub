@@ -1,0 +1,89 @@
+#!/bin/sh
+set -e 
+
+stack_name=$1
+sleeve=$2
+action=$3
+staging=$4
+
+options_list="
+      env-check
+      test-template
+      simple-azure
+      simple-aws
+      simple-gcp
+"
+
+if [[ "$1" == "help" || "$2" == "help" || "$3" == "help" ]]; then
+  echo "
+      Triggers altered-carbon deployments on github using github-cli tool 'gh':
+        
+        cli/deploy-default-stack.sh \$STACK_NAME \$SLEEVE (apply/destroy)
+    
+      examples: 
+    
+        cli/deploy-default-stack mystackname simple-aws apply
+
+      can deploy to default.staging with an extra argument:
+
+        cli/deploy-default-stack mystackname simple-aws apply staging
+
+      list of sleeves: 
+      $options_list
+  "
+  exit 0
+fi
+
+if [[ -z "$stack_name" ]]; then
+  echo "missing stack_name"
+  echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply"
+  exit 1
+fi
+if [[ -z "$sleeve" ]]; then
+  echo "missing sleeve"
+  echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply"
+  exit 1
+fi
+
+valid_sleeve=false
+for sl in `echo $options_list`; do 
+  if [[ "$sleeve" == "$sl" ]]; then
+    valid_sleeve=true
+  fi
+done
+
+if [[ "$valid_sleeve" == "false" ]]; then
+  echo "invalid sleeve: $sleeve"
+  echo
+  echo "options: $options_list"
+  exit 1
+fi
+
+branch_name="$(git rev-parse --abbrev-ref HEAD)"
+
+if [[ $staging = "staging" ]]; then
+  if [[ $action = "apply" ]] || [[ $action == "destroy" ]]; then
+    gh workflow run $sleeve \
+      --ref $branch_name \
+      -f stack_name=$stack_name \
+      -f action=$action \
+      -f env_name=default.staging
+  else
+    echo "ERROR: action should be 'apply' or 'destroy'"
+    echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply staging"
+    exit 1
+  fi
+else
+  if [[ $action = "apply" ]] || [[ $action == "destroy" ]]; then
+    gh workflow run $sleeve \
+      --ref $branch_name \
+      -f stack_name=$stack_name \
+      -f action=$action \
+      -f env_name=default.prod
+  else
+    echo "ERROR: action should be 'apply' or 'destroy'"
+    echo "example: cli/deploy-default-stack.sh mystackname simple-aws apply"
+    exit 1
+  fi
+fi
+echo 

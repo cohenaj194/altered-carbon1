@@ -1,0 +1,79 @@
+#!/bin/bash
+set -ex
+
+SCRIPT_PATH="$(pwd)/templates/simple-aws"
+
+# allow for deployments to be in different regions or aws accounts from the one that contains the s3 bucket
+# if no DEPLOYMENT_AWS_* env vars are set default to use the same region and account as set in the env vars. 
+if [ -z "$DEPLOY_AWS_ACCESS_KEY_ID" ]; then
+  export DEPLOY_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+fi
+if [ -z "$DEPLOY_AWS_SECRET_ACCESS_KEY" ]; then
+  export DEPLOY_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+fi
+if [ -z "$DEPLOY_AWS_REGION" ]; then
+  export DEPLOY_AWS_REGION=$AWS_REGION
+fi
+
+# determine source of email for tags
+if [ ! -z "$GITHUB_ACTOR" ]; then
+  EMAIL=$GITHUB_ACTOR
+elif [[ ! -z "$GITLAB_USER_EMAIL" ]]; then
+  EMAIL=$GITLAB_USER_EMAIL
+else
+  echo "Error: missing both GITLAB_USER_EMAIL and GITHUB_ACTOR"
+  exit 1
+fi
+
+# create terraform vars file
+if [[ "$(echo "$ENV_NAME" | grep -c "stage")" -ne "0" ]]; then
+  echo "{
+    \"access_key\": \"$DEPLOY_AWS_ACCESS_KEY_ID\",
+    \"secret_key\": \"$DEPLOY_AWS_SECRET_ACCESS_KEY\",
+    \"region\": \"$DEPLOY_AWS_REGION\",
+    \"image\": \"$AWS_MACHINE_IMAGE\",
+
+    \"machine_public_key\": \"ssh-rsa ${SSH_PUBLIC_KEY}\",
+    \"iam_owner\": \"$EMAIL\",
+    \"env_name\": \"staging\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+else
+  echo "{
+    \"access_key\": \"$DEPLOY_AWS_ACCESS_KEY_ID\",
+    \"secret_key\": \"$DEPLOY_AWS_SECRET_ACCESS_KEY\",
+    \"region\": \"$DEPLOY_AWS_REGION\",
+    \"image\": \"$AWS_MACHINE_IMAGE\",
+
+    \"machine_public_key\": \"ssh-rsa ${SSH_PUBLIC_KEY}\",
+    \"iam_owner\": \"$EMAIL\",
+    \"env_name\": \"production\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+fi
+cat "${SCRIPT_PATH}/demo.tfvars.json" | jq .
+
+# set s3 backend
+echo "$(cat << EOF
+bucket  = "${S3_STORAGE_BUCKET}"
+key     = "${S3_STORAGE_PATH}/simple-aws/terraform.tfstate"
+region  = "${S3_BUCKET_REGION}"
+EOF
+)" > "$SCRIPT_PATH/s3_backend"
+
+## Method for injecting s3 backend into templates missing it:
+
+# echo "$(cat << EOF
+# terraform {
+#   backend "s3" {
+#     bucket  = "${S3_STORAGE_BUCKET}"
+#     key     = "${S3_STORAGE_PATH}/simple-aws/terraform.tfstate"
+#     region  = "${AWS_REGION}"
+#     encrypt = true
+#     max_retries = 100
+#   }
+# }
+
+# $(cat $SCRIPT_PATH/main.tf)
+# EOF
+# )" > $SCRIPT_PATH/main.tf

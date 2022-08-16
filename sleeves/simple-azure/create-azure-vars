@@ -1,0 +1,71 @@
+#!/bin/bash
+set -ex
+
+SCRIPT_PATH="$(pwd)/templates/simple-azure"
+
+az login --service-principal -u $AZURE_SERVICE_PRINCIPAL_URL -p $AZURE_PASSWORD --tenant $AZURE_TENANT
+az account set --subscription $AZURE_SUBSCRIPTION_ID
+# az vm image terms accept --urn "volterraedgeservices:volterra-node:volterra-node:0.7.1"
+
+# determine source of email for tags
+if [ ! -z "$GITHUB_ACTOR" ]; then
+  EMAIL=$GITHUB_ACTOR
+elif [[ ! -z "$GITLAB_USER_EMAIL" ]]; then
+  EMAIL=$GITLAB_USER_EMAIL
+else
+  echo "Error: missing both GITLAB_USER_EMAIL and GITHUB_ACTOR"
+  exit 1
+fi
+
+if [[ "$(echo "$ENV_NAME" | grep -c "stage")" -ne "0" ]]; then
+  echo "{
+    \"client_id\": \"$AZURE_APPID\",
+    \"client_secret\": \"$AZURE_PASSWORD\",
+    \"tenant_id\": \"$AZURE_TENANT\",
+    \"subscription_id\": \"$AZURE_SUBSCRIPTION_ID\",
+    \"location\": \"$AZURE_REGION\",
+    \"machine_public_key\": \"ssh-rsa ${SSH_PUBLIC_KEY}\",
+
+    \"iam_owner\": \"$EMAIL\",
+    \"env_name\": \"staging\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+else
+  echo "{
+    \"client_id\": \"$AZURE_APPID\",
+    \"client_secret\": \"$AZURE_PASSWORD\",
+    \"tenant_id\": \"$AZURE_TENANT\",
+    \"subscription_id\": \"$AZURE_SUBSCRIPTION_ID\",
+    \"location\": \"$AZURE_REGION\",
+    \"machine_public_key\": \"ssh-rsa ${SSH_PUBLIC_KEY}\",
+
+    \"iam_owner\": \"$EMAIL\",
+    \"env_name\": \"production\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+fi
+cat "${SCRIPT_PATH}/demo.tfvars.json" | jq .
+
+echo "$(cat << EOF
+bucket  = "${S3_STORAGE_BUCKET}"
+key     = "${S3_STORAGE_PATH}/simple-azure/terraform.tfstate"
+region  = "${S3_BUCKET_REGION}"
+EOF
+)" > "$SCRIPT_PATH/s3_backend"
+
+## Method for injecting s3 backend into templates missing it:
+
+# echo "$(cat << EOF
+# terraform {
+#   backend "s3" {
+#     bucket  = "${S3_STORAGE_BUCKET}"
+#     key     = "${S3_STORAGE_PATH}/simple-azure/terraform.tfstate"
+#     region  = "${S3_BUCKET_REGION}"
+#     encrypt = true
+#     max_retries = 100
+#   }
+# }
+
+# $(cat $SCRIPT_PATH/main.tf)
+# EOF
+# )" > $SCRIPT_PATH/main.tf

@@ -1,0 +1,241 @@
+#!/bin/sh
+set -ex
+
+## Create a json object in each stacks directory listing:
+# * the stack name
+# * the stack state (created or destroyed)
+# * a list of links to all pipelines that touched the stack
+# * the username of the git user that originally created the stack
+
+# # example of stack-records.json
+# {
+#   "stack_name": "somename",
+#   "state": "apply",
+#   "env_name": "default.staging",
+#   "sleeve": "simple-aws",
+#   "pipelines": [
+#     {
+#       "url": "https://github.com/$YOUR_PROJECT/altered-carbon/runs/1234",
+#       "GITLAB_USER_EMAIL": "someusersname",
+#       "action": "apply",
+#       "date":  "Thu May 14 09:41:59 PDT 2020"
+#     },
+#     {
+#       "url": "https://github.com/$YOUR_PROJECT/altered-carbon/runs/2245",
+#       "GITLAB_USER_EMAIL": "someusersname",
+#       "action": "destroy",
+#       "date": "Thu May 14 10:41:59 PDT 2020"
+#     }
+#   ],
+#   "creator": "someusersname",
+#   "workgroup": [
+#     "teammember1",
+#     "teammember2"
+#   ]
+# }
+
+# exit if env vars are not set
+if [ -z "$AC_GITHUB_ACCESS_TOKEN" ]; then
+  echo "No AC_GITHUB_ACCESS_TOKEN secret Detected"
+  exit 1
+fi
+
+# record if the pipeline is for an apply or destroy
+if [[ "$STACK_NAME" == "" ]]; then
+  echo "Error STACK_NAME cannot be set as an empty string ''"
+  exit 1
+elif [[ "$STACK_NAME" =~ [A-Z]  ]]; then 
+  echo "Error STACK_NAME cannot contain capital letters"
+  exit 1
+elif [[ "$SLEEVE" == "" ]]; then
+  echo "Error SLEEVE cannot be set as an empty string ''"
+  exit 1
+fi
+
+s3_check(){
+  # verify s3 bucket exists
+  echo "Verify $S3_STORAGE_BUCKET exists:"
+  aws s3 ls $S3_STORAGE_BUCKET
+
+  echo "Download stack-records.json if created by previous pipeline:"
+  ./sleeves/common/s3-safe-download \
+    "${S3_STORAGE_PATH}/stack-records.json" \
+    "stack-records.json"
+}
+
+sleeve_sanity_checks(){
+  original_sleeve="$(jq -r .sleeve updated-stack-records.json)"
+  # fail if current pipelines SLEEVE does not match the original SLEEVE
+  if [[ "$original_sleeve" != "$SLEEVE" ]]; then
+    echo "ERROR: Current pipeline sleeve '$SLEEVE' does not match original sleeve '$original_sleeve'"
+    exit 2
+  else
+    echo "SLEEVE maches original SLEEVE"
+  fi
+}
+
+new_stack_sleeve_sanity_checks(){
+  # new stacks have a limit on how long their STACK_NAME can be
+  cluster_name_character_limit_check
+  # new stacks should not show any matches from list-stacks
+  if [ $(cli/stack-lookup list-stacks $STACK_NAME | grep -c $STACK_NAME) -ne 0 ]; then
+    # if a match is found collect matching stack-records
+    echo "Matching stack names detected please wait while stack-records are collected..."
+    matching_records=$(cli/stack-lookup stack-records $STACK_NAME)
+    matching_amt=$(echo $matching_records | jq '.|length')
+    for record in $(seq 0 $(($matching_amt-1)) ); do
+      match_name=$(echo $matching_records | jq -r ".[$record].stack_name")
+      match_env_name=$(echo $matching_records | jq -r ".[$record].env_name")
+      match_sleeve=$(echo $matching_records | jq -r ".[$record].sleeve")
+      # fail for duplicate name in different sleeve
+      if [[ "$STACK_NAME" == "$match_name" -a "$SLEEVE" != "$match_sleeve" ]]; then
+        echo "ERROR: Detected duplicate STACK_NAME with different SLEEVE:"
+        echo "{\"STACK_NAME\": \"$match_name\",\"SLEEVE\":\"$match_sleeve\",\"ENV_NAME\":\"$match_env_name\"}"
+        exit 1
+      # fail for duplicate name in different env_name
+      elif [[ "$STACK_NAME" == "$match_name" -a "$ENV_NAME" != "$match_env_name" ]]; then
+        echo "ERROR: Detected duplicate STACK_NAME with different ENV_NAME:"
+        echo "{\"STACK_NAME\": \"$match_name\",\"SLEEVE\":\"$match_sleeve\",\"ENV_NAME\":\"$match_env_name\"}"
+        exit 1
+      fi
+    done
+  else
+    echo "Sucess: $STACK_NAME does not match any existing stack names."
+  fi
+}
+
+cluster_name_character_limit_check(){
+  if [[ ${#STACK_NAME} -gt 17 ]]; then
+    echo "ERROR: Due to cluster name limits any new STACK_NAME must be less than 17 characters"
+    exit 1
+  elif [[ ${#STACK_NAME} -gt 16 && "$SLEEVE" == "simple-azure" ]]; then
+    # limit is lower because azure sites automatically get the name ending '-azure'
+    echo "ERROR: Due to cluster name limits any new STACK_NAME for $SLEEVE must be less than 11 characters"
+    exit 1
+  elif [[ ${#STACK_NAME} -gt 15 && "$SLEEVE" == "simple-aws" ]]; then
+    # limit is lower because aws sites automatically get the name ending '-aws'
+    echo "ERROR: Due to cluster name limits any new STACK_NAME for $SLEEVE must be less than 13 characters"
+    exit 1
+  else
+    echo "New stack name $STACK_NAME is ${#STACK_NAME} characters long and valid for $SLEEVE."
+  fi
+}
+
+## The following jobs used to rely on some amount of gitlab api and were changed to fit the github api
+records_create_update(){
+  # create object if first time the stack is run
+  if [[ ! -f "stack-records.json" ]]; then
+    echo "New Stack Detected"
+    new_stack_sleeve_sanity_checks
+    echo "{
+      \"stack_name\": \"$STACK_NAME\",
+      \"state\": \"$ACTION\",
+      \"env_name\": \"$ENV_NAME\",
+      \"sleeve\": \"$SLEEVE\",
+      \"pipelines\": [
+        {
+          \"url\": \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",
+          \"GITLAB_USER_EMAIL\": \"$GITHUB_ACTOR\",
+          \"action\": \"$ACTION\",
+          \"date\": \"$(env TZ=America/Los_Angeles date)\"
+        }
+      ],
+      \"creator\": \"$GITHUB_ACTOR\",
+      \"workgroup\": []
+    }"| jq . > updated-stack-records.json
+  # add ci pipeline info to existing
+  else
+    # get info for current pipeline running
+    current_pipeline="{
+      \"url\": \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",
+      \"GITLAB_USER_EMAIL\": \"$GITHUB_ACTOR\",
+      \"action\": \"$ACTION\",
+      \"date\": \"$(env TZ=America/Los_Angeles date)\"
+    }"
+    echo -e "current pipeline info:\n$current_pipeline"
+
+    # add pipeline info into pipelines list
+    cat stack-records.json | jq ".pipelines += [$current_pipeline]" > updated-stack-records.json
+
+    # update state
+    cat updated-stack-records.json | jq ".state = \"$ACTION\"" > temp.json
+    cat temp.json > updated-stack-records.json
+  fi
+}
+
+user_permissions_checks(){
+  # admins can manage any stack
+  admins="
+    alexcohen@ves.io
+    ale.cohen@f5.com
+    cohenaj194@gmail.com
+    cohenaj194
+  "
+  # a workgroup member can manage a stack if their GITHUB_ACTOR is in the stacks workgroup array
+  workgroup="$(jq -r .workgroup[] updated-stack-records.json)"
+
+  # creator can always manage their own stack
+  creator="$(jq -r .creator updated-stack-records.json)"
+
+  # admins always pass
+  if [[ "$(echo $admins | grep -c $GITHUB_ACTOR)" -ne 0 ]]; then
+    echo "Admin user detected: $GITHUB_ACTOR"
+  # pass if workgroup contains user
+  elif [[ "$(echo $workgroup | grep -c $GITHUB_ACTOR)" -ne 0 ]]; then
+    echo "Workgroup member detected: $GITHUB_ACTOR"
+  # fail if current pipelines SLEEVE does not match the original SLEEVE
+  elif [[ "$GITHUB_ACTOR" != "$creator" ]]; then
+    echo "ERROR: $GITHUB_ACTOR is not the STACK creator or a member of STACK workgroup."
+    echo "       Contact the altered-carbon slack channel and request access to this stack."
+    exit 4
+  fi
+}
+
+concurrency_check(){
+  # get ids for all running pipelines except the pipeline for this job
+  echo $AC_GITHUB_ACCESS_TOKEN > github_token
+  gh auth login --with-token < github_token
+  # we should look for both in progress and queued with `grep 'in_progress\|queued'`
+  # however we can only look at the output of in progress pipelines to see if they are using the same STACK_NAME
+  set +e
+  running_pipeline_ids=$(gh run list --workflow=$SLEEVE --repo=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY \
+    | grep 'in_progress' \
+    | awk '{print $((NF-2))}' \
+    | grep -v $GITHUB_RUN_ID)
+  set -e
+  for running_pipeline_id in $running_pipeline_ids; do
+    # get the stack name for all other running pipelines
+
+    ## CURRENT WORKAROUND TO INPUT LOOKUP ISSUE ##
+    ## FAIL IF ANY OTHER SLEEVES OF THE SAME TYPE ARE RUNNING CONCURRENTLY ##
+    echo "ERROR: concurrent pipeline detected using the same sleeve: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$running_pipeline_id"
+    exit 1
+    ## FAIL IF ANY OTHER SLEEVES OF THE SAME TYPE ARE RUNNING CONCURRENTLY ##
+
+    ## NEED SOMETHING ELSE HERE, `gh run view` CANNOT VIEW LOGS OF RUNNING PIPELINES ## 
+    running_pipeline_stack_name=$(gh run view $running_pipeline_id --repo=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY --log \
+      | grep 'STACK_NAME:' | head -n 1 \
+      | awk -F "STACK_NAME:" '{print $2}' | awk '{print $1}')
+    ## NEED SOMETHING ELSE HERE, `gh run view` CANNOT VIEW LOGS OF RUNNING PIPELINES ## 
+
+    # fail if we detect another pipeline running against the same stack
+    if [ "$running_pipeline_stack_name" == "$STACK_NAME" ]; then
+      echo "ERROR: concurrent pipeline detected. $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$running_pipeline_id"
+      echo "Please try again after the running pipeline has completed."
+      exit 1
+    fi
+  done
+}
+
+# upload updated records to s3
+upload_records(){
+  echo -e "pipeline info:\n$(cat updated-stack-records.json)"
+  aws s3 cp updated-stack-records.json "s3://$S3_STORAGE_BUCKET/$S3_STORAGE_PATH/stack-records.json"
+}
+
+s3_check
+records_create_update
+sleeve_sanity_checks
+user_permissions_checks
+concurrency_check
+upload_records

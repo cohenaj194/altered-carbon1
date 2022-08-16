@@ -1,0 +1,69 @@
+#!/bin/bash
+set -ex
+
+SCRIPT_PATH="$(pwd)/templates/simple-gcp"
+
+# write GOOGLE_APPLICATION_CREDENTIALS file from env var
+gcp_credentials_path="${SCRIPT_PATH}/gcp_credentials.json"
+echo $GOOGLE_APPLICATION_CREDENTIALS_BASE64 | /bin/base64 -d > $gcp_credentials_path
+
+# determine source of email for tags
+if [ ! -z "$GITHUB_ACTOR" ]; then
+  EMAIL=$GITHUB_ACTOR
+elif [[ ! -z "$GITLAB_USER_EMAIL" ]]; then
+  EMAIL=$GITLAB_USER_EMAIL
+else
+  echo "Error: missing both GITLAB_USER_EMAIL and GITHUB_ACTOR"
+  exit 1
+fi
+
+if [[ "$(echo "$ENV_NAME" | grep -c "stage")" -ne "0" ]]; then
+  echo "{
+    \"gcp_project_name\": \"$GCP_PROJECT_NAME\",
+    \"region\": \"$GCP_REGION\",
+    \"zone\": \"$GCP_ZONE\",
+    \"gcp_credentials_file_path\": \"${gcp_credentials_path}\",
+    \"machine_public_key\": \"ssh-rsa ${SSH_PUBLIC_KEY}\",
+
+    \"iam_owner\": \"$EMAIL\",
+    \"env_name\": \"staging\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+else
+  echo "{
+    \"gcp_project_name\": \"$GCP_PROJECT_NAME\",
+    \"region\": \"$GCP_REGION\",
+    \"zone\": \"$GCP_ZONE\",
+    \"gcp_credentials_file_path\": \"${gcp_credentials_path}\",
+    \"machine_public_key\": \"ssh-rsa ${SSH_PUBLIC_KEY}\",
+
+    \"iam_owner\": \"$EMAIL\",
+    \"env_name\": \"production\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+fi
+cat "${SCRIPT_PATH}/demo.tfvars.json" | jq .
+
+echo "$(cat << EOF
+bucket  = "${S3_STORAGE_BUCKET}"
+key     = "${S3_STORAGE_PATH}/simple-gcp/terraform.tfstate"
+region  = "${S3_BUCKET_REGION}"
+EOF
+)" > "$SCRIPT_PATH/s3_backend"
+
+## Method for injecting s3 backend into templates missing it:
+
+# echo "$(cat << EOF
+# terraform {
+#   backend "s3" {
+#     bucket  = "${S3_STORAGE_BUCKET}"
+#     key     = "${S3_STORAGE_PATH}/simple-gcp/terraform.tfstate"
+#     region  = "${S3_BUCKET_REGION}"
+#     encrypt = true
+#     max_retries = 100
+#   }
+# }
+
+# $(cat $SCRIPT_PATH/main.tf)
+# EOF
+# )" > $SCRIPT_PATH/main.tf

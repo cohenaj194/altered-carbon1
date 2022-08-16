@@ -1,0 +1,246 @@
+#!/bin/sh
+set -ex
+
+## Create a json object in each stacks directory listing:
+# * the stack name
+# * the stack state (created or destroyed)
+# * a list of links to all pipelines that touched the stack
+# * the username of the gitlab user that originally created the stack
+
+# # example of stack-records.json
+# {
+#   "stack_name": "somename",
+#   "state": "apply",
+#   "env_name": "default.staging",
+#   "sleeve": "simple-aws",
+#   "pipelines": [
+#     {
+#       "url": "https://gitlab.com/$YOUR_PROJECT/altered-carbon/pipelines/1243",
+#       "GITLAB_USER_EMAIL": "someusersname",
+#       "CI_REGISTRY_USER": "somecitoken",
+#       "action": "apply",
+#       "date":  "Thu May 14 09:41:59 PDT 2020"
+#     },
+#     {
+#       "url": "https://gitlab.com/$YOUR_PROJECT/altered-carbon/pipelines/2245",
+#       "GITLAB_USER_EMAIL": "someusersname",
+#       "CI_REGISTRY_USER": "somecitoken",
+#       "action": "destroy",
+#       "date": "Thu May 14 10:41:59 PDT 2020"
+#     }
+#   ],
+#   "creator": "someusersname",
+#   "workgroup": [
+#     "teammember1",
+#     "teammember2"
+#   ]
+# }
+
+# Make sure the trigger payload env vars are set
+for s in $(cat $TRIGGER_PAYLOAD | jq .variables| jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" ); do
+    export $s
+done
+
+# exit if env vars are not set
+if [ -z "$AC_GITLAB_PROJECT_ID" ]; then
+  echo "No AC_GITLAB_PROJECT_ID Detected"
+  exit 1
+fi
+
+# record if the pipeline is for an apply or destroy
+if [[ "$STACK_NAME" == "nil" && "$SLEEVE" == "nil" ]]; then
+  echo "No STACK_NAME or SLEEVE Detected"
+  exit 1
+elif [[ "$STACK_NAME" == "" ]]; then
+  echo "Error STACK_NAME cannot be set as an empty string ''"
+  exit 1
+elif [[ "$STACK_NAME" =~ [A-Z]  ]]; then 
+  echo "Error STACK_NAME cannot contain capital letters"
+  exit 1
+elif [[ "$SLEEVE" == "" ]]; then
+  echo "Error SLEEVE cannot be set as an empty string ''"
+  exit 1
+fi
+if [[ "$DESTROY" == "nil" ]]; then
+  ACTION="apply"
+else
+  ACTION="destroy"
+fi
+
+s3_check(){
+  # verify s3 bucket exists
+  echo "Verify $S3_STORAGE_BUCKET exists:"
+  aws s3 ls $S3_STORAGE_BUCKET
+
+  echo "Download stack-records.json if created by previous pipeline:"
+  ./sleeves/common/s3-safe-download \
+    "${S3_STORAGE_PATH}/stack-records.json" \
+    "stack-records.json"
+}
+
+records_create_update(){
+  # create object if first time the stack is run
+  if [[ ! -f "stack-records.json" ]]; then
+    echo "New Stack Detected"
+    new_stack_sleeve_sanity_checks
+    echo "{
+      \"stack_name\": \"$STACK_NAME\",
+      \"state\": \"$ACTION\",
+      \"env_name\": \"$ENV_NAME\",
+      \"sleeve\": \"$SLEEVE\",
+      \"pipelines\": [
+        {
+          \"url\": \"$CI_PROJECT_URL/pipelines/$CI_PIPELINE_ID\",
+          \"GITLAB_USER_EMAIL\": \"$GITLAB_USER_EMAIL\",
+          \"CI_REGISTRY_USER\": \"$CI_REGISTRY_USER\",
+          \"action\": \"$ACTION\",
+          \"date\": \"$(env TZ=America/Los_Angeles date)\"
+        }
+      ],
+      \"creator\": \"$GITLAB_USER_EMAIL\",
+      \"workgroup\": []
+    }"| jq . > updated-stack-records.json
+  # add ci pipeline info to existing
+  else
+    # get info for current pipeline running
+    current_pipeline="{
+      \"url\": \"$CI_PROJECT_URL/pipelines/$CI_PIPELINE_ID\",
+      \"GITLAB_USER_EMAIL\": \"$GITLAB_USER_EMAIL\",
+      \"CI_REGISTRY_USER\": \"$CI_REGISTRY_USER\",
+      \"action\": \"$ACTION\",
+      \"date\": \"$(env TZ=America/Los_Angeles date)\"
+    }"
+    echo -e "current pipeline info:\n$current_pipeline"
+
+    # add pipeline info into pipelines list
+    cat stack-records.json | jq ".pipelines += [$current_pipeline]" > updated-stack-records.json
+
+    # update state
+    cat updated-stack-records.json | jq ".state = \"$ACTION\"" > temp.json
+    cat temp.json > updated-stack-records.json
+  fi
+}
+
+sleeve_sanity_checks(){
+  original_sleeve="$(jq -r .sleeve updated-stack-records.json)"
+  # fail if current pipelines SLEEVE does not match the original SLEEVE
+  if [[ "$original_sleeve" != "$SLEEVE" ]]; then
+    echo "ERROR: Current pipeline sleeve '$SLEEVE' does not match original sleeve '$original_sleeve'"
+    exit 2
+  else
+    echo "SLEEVE maches original SLEEVE"
+  fi
+  # fail if DESTROY is called and DESTROY does not match the original SLEEVE
+  if [[ "$DESTROY" != "nil" && "$original_sleeve" != "$DESTROY" ]]; then
+    echo "ERROR: DESTROY and SLEEVE mismatch, '$DESTROY' does not match original sleeve '$original_sleeve'"
+    exit 3
+  fi
+}
+
+new_stack_sleeve_sanity_checks(){
+  # new stacks have a limit on how long their STACK_NAME can be
+  cluster_name_character_limit_check
+  # new stacks should not show any matches from list-stacks
+  if [ $(cli/stack-lookup list-stacks $STACK_NAME | grep -c $STACK_NAME) -ne 0 ]; then
+    # if a match is found collect matching stack-records
+    echo "Matching stack names detected please wait while stack-records are collected..."
+    matching_records=$(cli/stack-lookup stack-records $STACK_NAME)
+    matching_amt=$(echo $matching_records | jq '.|length')
+    for record in $(seq 0 $(($matching_amt-1)) ); do
+      match_name=$(echo $matching_records | jq -r ".[$record].stack_name")
+      match_env_name=$(echo $matching_records | jq -r ".[$record].env_name")
+      match_sleeve=$(echo $matching_records | jq -r ".[$record].sleeve")
+      # fail for duplicate name in different sleeve
+      if [[ "$STACK_NAME" == "$match_name" -a "$SLEEVE" != "$match_sleeve" ]]; then
+        echo "ERROR: Detected duplicate STACK_NAME with different SLEEVE:"
+        echo "{\"STACK_NAME\": \"$match_name\",\"SLEEVE\":\"$match_sleeve\",\"ENV_NAME\":\"$match_env_name\"}"
+        exit 1
+      # fail for duplicate name in different env_name
+      elif [[ "$STACK_NAME" == "$match_name" -a "$ENV_NAME" != "$match_env_name" ]]; then
+        echo "ERROR: Detected duplicate STACK_NAME with different ENV_NAME:"
+        echo "{\"STACK_NAME\": \"$match_name\",\"SLEEVE\":\"$match_sleeve\",\"ENV_NAME\":\"$match_env_name\"}"
+        exit 1
+      fi
+    done
+  else
+    echo "Sucess: $STACK_NAME does not match any existing stack names."
+  fi
+}
+
+cluster_name_character_limit_check(){
+  if [[ ${#STACK_NAME} -gt 17 ]]; then
+    echo "ERROR: Due to cluster name limits any new STACK_NAME must be less than 17 characters"
+    exit 1
+  elif [[ ${#STACK_NAME} -gt 16 && "$SLEEVE" == "simple-azure" ]]; then
+    # limit is lower because azure sites automatically get the name ending '-azure'
+    echo "ERROR: Due to cluster name limits any new STACK_NAME for $SLEEVE must be less than 11 characters"
+    exit 1
+  elif [[ ${#STACK_NAME} -gt 15 && "$SLEEVE" == "simple-aws" ]]; then
+    # limit is lower because aws sites automatically get the name ending '-aws'
+    echo "ERROR: Due to cluster name limits any new STACK_NAME for $SLEEVE must be less than 13 characters"
+    exit 1
+  else
+    echo "New stack name $STACK_NAME is ${#STACK_NAME} characters long and valid for $SLEEVE."
+  fi
+}
+
+user_permissions_checks(){
+  # admins can manage any stack
+  admins="
+    alexcohen@ves.io
+    ale.cohen@f5.com
+  "
+  # a workgroup member can manage a stack if their GITLAB_USER_EMAIL is in the stacks workgroup array
+  workgroup="$(jq -r .workgroup[] updated-stack-records.json)"
+
+  # creator can always manage their own stack
+  creator="$(jq -r .creator updated-stack-records.json)"
+
+  # admins always pass
+  if [[ "$(echo $admins | grep -c $GITLAB_USER_EMAIL)" -ne 0 ]]; then
+    echo "Admin user detected: $GITLAB_USER_EMAIL"
+  # pass if workgroup contains user
+  elif [[ "$(echo $workgroup | grep -c $GITLAB_USER_EMAIL)" -ne 0 ]]; then
+    echo "Workgroup member detected: $GITLAB_USER_EMAIL"
+  # fail if current pipelines SLEEVE does not match the original SLEEVE
+  elif [[ "$GITLAB_USER_EMAIL" != "$creator" ]]; then
+    echo "ERROR: $GITLAB_USER_EMAIL is not the STACK creator or a member of STACK workgroup."
+    echo "       Contact the altered-carbon slack channel and request access to this stack."
+    exit 4
+  fi
+}
+
+concurrency_check(){
+  # get ids for all running pipelines except the pipeline for this job
+  set +e
+  running_pipeline_ids=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_API_PRIVATE_TOKEN" \
+    https://gitlab.com/api/v4/projects/$AC_GITLAB_PROJECT_ID/pipelines \
+    | jq -r '.[] | select(.status=="running")| .id' \
+    | grep -v $CI_PIPELINE_ID)
+  set -e
+  for running_pipeline_id in $running_pipeline_ids; do
+    # get the stack name for all other running pipelines
+    running_pipeline_stack_name=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_API_PRIVATE_TOKEN" \
+      https://gitlab.com/api/v4/projects/$AC_GITLAB_PROJECT_ID/pipelines/$running_pipeline_id/variables\
+      | jq -r '.[] | select(.key=="STACK_NAME")| .value')
+    # fail if we detect another pipeline running against the same stack
+    if [ "$running_pipeline_stack_name" == "$STACK_NAME" ]; then
+      echo "ERROR: concurrent pipeline detected. $CI_PROJECT_URL/pipelines/$running_pipeline_id"
+      echo "Please try again after the running pipeline has completed."
+      exit 1
+    fi
+  done
+}
+
+# upload updated records to s3
+upload_records(){
+  echo -e "pipeline info:\n$(cat updated-stack-records.json)"
+  aws s3 cp updated-stack-records.json "s3://$S3_STORAGE_BUCKET/$S3_STORAGE_PATH/stack-records.json"
+}
+
+s3_check
+records_create_update
+sleeve_sanity_checks
+user_permissions_checks
+concurrency_check
+upload_records

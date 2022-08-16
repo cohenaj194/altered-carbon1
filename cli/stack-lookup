@@ -1,0 +1,104 @@
+#!/bin/sh
+
+# verify s3 bucket is valid
+aws s3 ls $S3_STORAGE_BUCKET > /dev/null 2>&1
+exit_status=$?
+if [ $exit_status -ne 0 ]; then
+  echo "ERROR: Could not find S3 bucket $S3_STORAGE_BUCKET:"
+  aws s3 ls $S3_STORAGE_BUCKET
+  exit $exit_status
+fi
+
+# exit on failure
+set -e 
+
+action=$1
+stack_requested=$2
+
+ls_stacks(){
+  if [[ -z "$stack_requested" ]]; then
+    stack_list=$(aws s3 ls $S3_STORAGE_BUCKET --recursive | grep $1 | awk '{print $NF}' | awk -F'/' '{print $3"\t"$2"\t"$1}')
+  else
+    stack_list=$(aws s3 ls $S3_STORAGE_BUCKET --recursive | grep $1 | grep "$stack_requested" | awk '{print $NF}' | awk -F'/' '{print $3"\t"$2"\t"$1}' )
+  fi
+}
+
+list_stacks(){
+  ls_stacks "stack-records.json"
+  echo "STACK_NAME SLEEVE ENV_NAME\n${stack_list}" |sed  's/\// /g' |column -t|uniq
+}
+stack_records(){
+  if [[ -z "$stack_requested" ]]; then
+    echo "ERROR: 'stack-records' requires a stack name:"
+    echo "       ./stack-lookup stack-records foobar123"
+    exit 1
+  fi
+  raw_stack_list=$(aws s3 ls $S3_STORAGE_BUCKET --recursive | grep stack-records.json | grep "$stack_requested" | awk '{print $NF}')
+  stack_list_json='[]'
+  for stack_record_file in $raw_stack_list; do
+    aws s3 cp "s3://$S3_STORAGE_BUCKET/$stack_record_file" /tmp/stack-records.json > /dev/null 2>&1
+    if [ -f /tmp/stack-records.json ]; then
+      stack_record=$(cat /tmp/stack-records.json)
+      rm /tmp/stack-records.json
+      stack_list_json=$(echo $stack_list_json | jq ". += [$stack_record]")
+    fi
+  done
+  echo $stack_list_json | jq .
+}
+
+download_kubeconfigs(){
+  if [[ -z "$stack_requested" ]]; then
+    echo "ERROR: 'download-kubeconfigs' requires a stack name:"
+    echo "       ./stack-lookup download-kubeconfigs foobar123"
+    exit 1
+  fi
+  records="$(stack_records)"
+  stack_amt="$(($(echo $records | jq length)-1))"
+  for stack_num in `seq 0 $stack_amt`; do
+    s3_path="$(echo $records | jq -r .[$stack_num].env_name)/$(echo $records | jq -r .[$stack_num].sleeve)/$(echo $records | jq -r .[$stack_num].stack_name)"
+    kubeconfig_paths=$(aws s3 ls "$S3_STORAGE_BUCKET/$s3_path" --recursive |grep kubeconfig |awk '{print $4}')
+    if [ -z "$kubeconfig_paths" ]; then
+      echo "No kubeconfigs found for '$s3_path'"
+    fi
+    for kubeconfig_path in $kubeconfig_paths; do
+      mkdir -p ~/Downloads/$stack_requested/
+      aws s3 cp "s3://$S3_STORAGE_BUCKET/$kubeconfig_path" ~/Downloads/$stack_requested/
+    done
+  done
+}
+
+main(){
+# help
+if [ "$action" == "help" -o "$action" == "--help" ]; then
+  echo "
+      Looks up information on altered-carbon stacks:
+    
+      list-stacks (l)           list stacks
+      stack-records (r)         output stack-records json list for all stacks matching a given STACK_NAME
+      download-kubeconfigs (d)  download all kubeconfigs of a stack to ~/Downloads/
+    
+      examples: 
+    
+        cli/stack-lookup list-stacks 
+        cli/stack-lookup l
+        cli/stack-lookup list-stacks foobar
+        cli/stack-lookup stack-records foobar 
+        cli/stack-lookup r foobar
+        cli/stack-lookup download-kubeconfigs foobar
+        cli/stack-lookup d foobar
+  "
+# get stack list
+elif [ "$action" == "list-stacks" ] || [ "$action" == "l" ]; then
+  list_stacks
+# get stack records
+elif [ "$action" == "stack-records" ] || [ "$action" == "r" ]; then
+  stack_records
+elif [[ "$action" == "download-kubeconfigs" ]] || [ "$action" == "d" ]; then
+  download_kubeconfigs
+else
+  echo "Error '$action' is not a valid action. Proper stack-lookup usage:"
+  echo "  cli/stack-lookup \$command \$stack_name"
+  exit 1
+fi
+}
+main

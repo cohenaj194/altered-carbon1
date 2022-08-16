@@ -1,0 +1,41 @@
+#!/bin/bash
+set -ex
+
+SCRIPT_PATH="$(pwd)/templates/test-template"
+
+if [[ "$(echo "$ENV_NAME" | grep -c "stage")" -ne "0" ]]; then
+  echo "{
+    \"env_name\": \"staging\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+else
+  echo "{
+    \"env_name\": \"production\",
+    \"name\": \"$STACK_NAME\"
+  }" > "${SCRIPT_PATH}/demo.tfvars.json"
+fi
+cat "${SCRIPT_PATH}/demo.tfvars.json" | jq .
+
+echo "$(cat << EOF
+bucket  = "${S3_STORAGE_BUCKET}"
+key     = "${S3_STORAGE_PATH}/test-template/terraform.tfstate"
+region  = "${S3_BUCKET_REGION}"
+EOF
+)" > "$SCRIPT_PATH/s3_backend"
+
+## Method for injecting s3 backend into templates missing it:
+
+echo "$(cat << EOF
+terraform {
+  backend "s3" {
+    bucket  = "${S3_STORAGE_BUCKET}"
+    key     = "${S3_STORAGE_PATH}/test-template/terraform.tfstate"
+    region  = "${S3_BUCKET_REGION}"
+    encrypt = true
+    max_retries = 100
+  }
+}
+
+$(cat $SCRIPT_PATH/main.tf)
+EOF
+)" > $SCRIPT_PATH/main.tf

@@ -1,0 +1,61 @@
+variables:
+  S3_STORAGE_PATH: "$ENV_NAME/$SLEEVE/$STACK_NAME"
+
+stages:
+  - stack_records
+  - deploy_infra
+  - maintanance
+  - deploy_main
+  - test
+  - destroy
+
+.alpine_setup: &alpine_setup
+  image: gcr.io/solutions-team-280017/swiss-alpine:latest
+  before_script:
+    - jq --version
+    - curl --version
+    # - kubectl version
+    - aws-iam-authenticator version
+
+# STACK_RECORDS creates and updates a stack-records.json file in each stack
+stack_records:
+  tags:
+    - experimental
+  <<: *alpine_setup
+  except:
+    variables:
+      - $SLEEVE == "environment-check"
+    refs:
+      - schedules
+      - pushes
+  stage: stack_records
+  script:
+    - ./sleeves/common/stack-records
+
+#-- SLEEVE list
+#--  define which stack to use
+.environment_check: &environment_check
+  only:
+    variables:
+      - $SLEEVE == "environment-check"
+  except:
+    - schedules
+
+#-- SLEEVE jobs
+#-- define what is deployed
+# SLEEVE = 'environment-check'
+environment_check:
+  tags:
+    - experimental
+  <<: *alpine_setup
+  <<: *environment_check
+  stage: test
+  script:
+    - echo "s3://$S3_STORAGE_BUCKET/$S3_STORAGE_PATH/"
+  retry: 2
+
+include:
+  - sleeve-simple-aws.yml
+  - sleeve-simple-azure.yml
+  - sleeve-simple-gcp.yml
+  - sleeve-test-template.yml

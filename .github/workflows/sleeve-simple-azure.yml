@@ -1,0 +1,129 @@
+# run with: 
+#     gh workflow run simple-azure --ref "$(git rev-parse --abbrev-ref HEAD)" -f action=apply
+
+name: simple-azure
+
+env:
+  SLEEVE: simple-azure
+  S3_STORAGE_BUCKET: ${{ secrets.S3_STORAGE_BUCKET }}
+  S3_BUCKET_REGION: ${{ secrets.S3_BUCKET_REGION }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AC_GITHUB_ACCESS_TOKEN: ${{ secrets.AC_GITHUB_ACCESS_TOKEN }}
+  SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+  SSH_PRIVATE_KEY_BASE64: ${{ secrets.SSH_PRIVATE_KEY_BASE64 }}
+  TF_PUBLIC_PROD_SHA: ${{ secrets.TF_PUBLIC_PROD_SHA }}
+  # gcp vars
+  AZURE_SERVICE_PRINCIPAL_URL: ${{ secrets.AZURE_SERVICE_PRINCIPAL_URL }}
+  AZURE_PASSWORD: ${{ secrets.AZURE_PASSWORD }}
+  AZURE_TENANT: ${{ secrets.AZURE_TENANT }}
+  AZURE_APPID: ${{ secrets.AZURE_APPID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_REGION: ${{ secrets.AZURE_REGION }}
+
+on: 
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: 'name for stack created or destroyed'
+        default: ''
+        required: true
+      action:
+        description: 'apply or destroy stack'
+        required: true
+        # no default, require user input
+        type: choice
+        default: apply
+        options:
+        - apply
+        - destroy
+      env_name:
+        description: 'env choice. ex: prod.default, stage.default'
+        default: 'default.prod'
+        required: true
+
+jobs:
+  ## fix this later to use stack_records as a workflow_call ##
+  # stack_records:
+  #   uses: .github/workflows/stack_records.yml
+  #   with:
+  #     stack_name: ${{ github.event.inputs.stack_name }}
+  #     action: ${{ github.event.inputs.action }}
+  #     env_name: ${{ github.event.inputs.env_name }}
+  #     sleeve: ${{ env.SLEEVE }}
+  ## fix this later to use stack_records as a workflow_call ##
+
+  stack_records:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/solutions-team-280017/swiss-alpine:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: stack_records
+        run: |
+          ./sleeves/common/stack-records-hub
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+
+  simple-azure-apply:
+    if: ${{ github.event.inputs.action == 'apply' }}
+    needs: stack_records
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/volterraio/volt-terraform:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: simple-azure-apply
+        run: |
+          ./sleeves/simple-azure/create-azure-vars
+          cd ./templates/simple-azure
+          terraform init -backend-config=s3_backend
+          terraform providers
+          terraform apply -var-file=demo.tfvars.json -auto-approve
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+
+  simple-azure-check-site:
+    runs-on: ubuntu-latest
+    needs: simple-azure-apply
+    container:
+      image: gcr.io/solutions-team-280017/swiss-alpine:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: simple-azure-check-site
+        run: |
+          aws s3 cp s3://${S3_STORAGE_BUCKET}/${S3_STORAGE_PATH}/${SLEEVE}/terraform.tfstate ./terraform.tfstate
+          ./sleeves/common/ansible-ping $(jq -r .outputs.public_addresses.value ./terraform.tfstate)
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+
+  simple-azure-destroy:
+    if: ${{ github.event.inputs.action == 'destroy' }}
+    needs: stack_records
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/volterraio/volt-terraform:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: simple-azure-destroy
+        run: |
+          ./sleeves/simple-azure/create-azure-vars
+          cd ./templates/simple-azure
+          terraform init -backend-config=s3_backend
+          terraform providers
+          terraform destroy -var-file=demo.tfvars.json -auto-approve
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+

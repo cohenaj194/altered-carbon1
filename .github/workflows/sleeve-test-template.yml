@@ -1,0 +1,101 @@
+# run with: 
+#     gh workflow run test-template --ref "$(git rev-parse --abbrev-ref HEAD)" -f action=apply
+
+name: test-template
+
+env:
+  SLEEVE: test-template
+  S3_STORAGE_BUCKET: ${{ secrets.S3_STORAGE_BUCKET }}
+  S3_BUCKET_REGION: ${{ secrets.S3_BUCKET_REGION }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AC_GITHUB_ACCESS_TOKEN: ${{ secrets.AC_GITHUB_ACCESS_TOKEN }}
+
+on: 
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: 'name for stack created or destroyed'
+        default: ''
+        required: true
+      action:
+        description: 'apply or destroy stack'
+        required: true
+        # no default, require user input
+        type: choice
+        options:
+        - apply
+        - destroy
+      env_name:
+        description: 'env choice. ex: prod.default, stage.default'
+        default: 'default.prod'
+        required: true
+
+jobs:
+  ## fix this later to use stack_records as a workflow_call ##
+  # stack_records:
+  #   uses: .github/workflows/stack_records.yml
+  #   with:
+  #     stack_name: ${{ github.event.inputs.stack_name }}
+  #     action: ${{ github.event.inputs.action }}
+  #     env_name: ${{ github.event.inputs.env_name }}
+  #     sleeve: ${{ env.SLEEVE }}
+  ## fix this later to use stack_records as a workflow_call ##
+
+  stack_records:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/solutions-team-280017/swiss-alpine:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: stack_records
+        run: |
+          ./sleeves/common/stack-records-hub
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+
+  test-template-apply:
+    if: ${{ github.event.inputs.action == 'apply' }}
+    needs: stack_records
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/solutions-team-280017/swiss-alpine:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: test-template-apply
+        run: |
+          ./sleeves/test-template/create-test-template-vars
+          cd ./templates/test-template
+          terraform init -backend-config=s3_backend
+          terraform providers
+          terraform apply -var-file=demo.tfvars.json -auto-approve
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+
+  test-template-destroy:
+    if: ${{ github.event.inputs.action == 'destroy' }}
+    needs: stack_records
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/solutions-team-280017/swiss-alpine:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: test-template-destroy
+        run: |
+          ./sleeves/test-template/create-test-template-vars
+          cd ./templates/test-template
+          terraform init -backend-config=s3_backend
+          terraform providers
+          terraform destroy -var-file=demo.tfvars.json -auto-approve
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
+

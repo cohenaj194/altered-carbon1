@@ -1,0 +1,52 @@
+#!/bin/bash
+set -x
+
+host_ip=$1
+if [[ -z "$host_ip" ]]; then
+	echo "No host ip given to ansible. Provide a valid host ip."
+  exit 1
+fi
+
+if [[ "$(echo "$SLEEVE" | grep -c "aws")" -ne "0"  ]]; then
+	instance_user=ec2-user
+else
+	instance_user=centos
+fi
+
+# setup hosts file
+echo "$(cat << EOF
+[all:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_connection=ssh
+
+[host1:vars]
+ansible_ssh_private_key_file=/machine_key
+ansible_ssh_user=${instance_user}
+[host1]
+${host_ip}
+EOF
+)" > ./sleeves/common/hosts
+
+# setup ssh key
+echo $SSH_PRIVATE_KEY_BASE64 | base64 -d > /machine_key
+chmod 600 /machine_key
+mkdir -m 700 /root/.ssh
+touch /root/.ssh/known_hosts
+ssh-keyscan -H "$host_ip" >> /root/.ssh/known_hosts
+
+# use host network
+echo "127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4" >> /etc/hosts
+echo "::1         localhost localhost.localdomain localhost6 localhost6.localdomain6" >> /etc/hosts
+# if using a password add on into host file to make sure we can connect to servers with ansible under vars
+# echo "ansible_ssh_pass=$SERVER_SSH_PASSWORD" >> ./sleeves/common/hosts
+
+waiting=0
+exit_status=1
+while [ $exit_status -ne 0 ] && [ $waiting -le 60 ]; do
+  ansible all -i ./sleeves/common/hosts -m ping
+  exit_status=$?
+  sleep 2
+  waiting=$((waiting+2))
+done
+
+exit $exit_status

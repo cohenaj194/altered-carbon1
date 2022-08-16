@@ -1,0 +1,12 @@
+#!/bin/sh
+
+bucket_path=$1
+local_path=$2
+
+if [ ! -z "$(aws s3api head-object --bucket "${S3_STORAGE_BUCKET}" --key "${bucket_path}")" ]; then 
+	aws s3 cp \
+		"s3://${S3_STORAGE_BUCKET}/${bucket_path}" \
+		"${local_path}"
+else
+	echo "File does not exist yet: 's3://${S3_STORAGE_BUCKET}/${bucket_path}'"
+fi

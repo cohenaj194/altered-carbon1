@@ -1,0 +1,49 @@
+# run with: 
+#     gh workflow run env-check --ref "$(git rev-parse --abbrev-ref HEAD)" -f action=apply
+
+name: env-check
+
+env:
+  S3_STORAGE_BUCKET: ${{ secrets.S3_STORAGE_BUCKET }}
+  SLEEVE: env-check
+
+on: 
+  # push:
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: 'name for stack created or destroyed'
+        default: 'basic-env-check'
+        required: true
+      action:
+        description: 'apply or destroy stack'
+        required: true
+        # no default, require user input
+        # default: 'apply'
+        type: choice
+        options:
+        - apply
+        - destroy
+      env_name:
+        description: 'env choice. ex: prod.default, stage.default'
+        default: 'default.prod'
+        required: true
+
+jobs:
+  env-check:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/solutions-team-280017/swiss-alpine:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: env-check
+        run: |
+          echo "s3://$S3_STORAGE_BUCKET/$S3_STORAGE_PATH"
+          echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          echo "$GITHUB_ACTOR"
+          # sleep 600
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENV_NAME: ${{ github.event.inputs.env_name }}
+          S3_STORAGE_PATH: "${{ github.event.inputs.env_name }}/${{ env.SLEEVE }}/${{ github.event.inputs.stack_name }}"
